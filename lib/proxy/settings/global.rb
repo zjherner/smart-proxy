@@ -6,7 +6,14 @@ module ::Proxy::Settings
       :log_file => "/var/log/foreman-proxy/proxy.log",
       :log_level => "ERROR",
       :daemon => false,
-      :daemon_pid => "/var/run/foreman-proxy/foreman-proxy.pid"
+      :daemon_pid => "/var/run/foreman-proxy/foreman-proxy.pid",
+      :forward_verify => true,
+      :bind_host => "*"
+    }
+
+    HOW_TO_NORMALIZE = {
+      # rubocop:disable Style/Lambda
+      :foreman_url => lambda { |value| value.end_with?("/") ? value : value + "/" }
     }
 
     attr_reader :used_defaults
@@ -17,8 +24,20 @@ module ::Proxy::Settings
         settings.delete :puppet   if settings.has_key? :puppet
         settings[:x86_64] = File.exist?('c:\windows\sysnative\cmd.exe')
       end
+
       @used_defaults = DEFAULT_SETTINGS.keys - settings.keys
-      super(DEFAULT_SETTINGS.merge(settings))
+
+      default_and_user_settings = DEFAULT_SETTINGS.merge(settings)
+      settings_to_use = Hash[ default_and_user_settings.map do |key, value|
+        [key, normalize_setting(key, value, HOW_TO_NORMALIZE)]
+      end ]
+
+      super(settings_to_use)
+    end
+
+    def normalize_setting(key, value, how_to)
+      return value unless how_to.has_key?(key)
+      how_to[key].call(value)
     end
   end
 end

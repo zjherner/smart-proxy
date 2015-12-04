@@ -9,11 +9,18 @@
 
 # Hosts which the proxy accepts connections from
 # commenting the following lines would mean every verified SSL connection allowed
+# HTTPS: test the certificate CN
+# HTTP: test the reverse DNS entry of the remote IP
 #:trusted_hosts:
 #- foreman.prod.domain
 #- foreman.dev.domain
 #to deny access to all hosts use:
 #:trusted_hosts: []
+
+# verify a DNS reverse lookup against it's forward lookup
+# 1.1.1.1 -> foreman.mycompany.com -> 1.1.1.1
+# (default: true)
+#:forward_verify: true
 
 #:foreman_url: http://127.0.0.1:3000
 
@@ -30,7 +37,9 @@
 # Uncomment and modify if you want to change the default pid file '/var/run/foreman-proxy/foreman-proxy.pid'
 #:daemon_pid: /var/run/foreman-proxy/foreman-proxy.pid
 
-# HTTP ports configuration
+# host and ports configuration
+# host to bind ports to (possible values: *, localhost, 0.0.0.0)
+#:bind_host: '*'
 # http is disabled by default. To enable, uncomment 'http_port' setting
 #:http_port: 8000
 # https is enabled if certificate, CA certificate, and private key are present in locations specifed by
@@ -42,7 +51,7 @@
 :virsh_network: default
 
 # Log configuration
-# Uncomment and modify if you want to change the location of the log file or use STDOUT
+# Uncomment and modify if you want to change the location of the log file or use STDOUT or SYSLOG values
 #:log_file: /var/log/foreman-proxy/proxy.log
 # Uncomment and modify if you want to change the log level
 # WARN, DEBUG, ERROR, FATAL, INFO, UNKNOWN

@@ -1,7 +1,7 @@
-require 'templates/handler'
+require 'templates/template_proxy_request'
+
 class Proxy::TemplatesApi < Sinatra::Base
   helpers ::Proxy::Helpers
-  authorize_with_trusted_hosts
 
   # When template feature is used, foreman uses this end-point to provide basse url for hosts to fetch templates.
   # It will also modify the rendering of the foreman_url specified in the templates.
@@ -15,8 +15,8 @@ class Proxy::TemplatesApi < Sinatra::Base
   end
 
   get "/:kind" do |kind|
-    log_halt(500, "Failed to retrieve #{kind} template for #{params[:token]}: ") do
-      Proxy::Templates::Handler.get_template(kind, params[:token], params[:static])
+    log_halt(500, "Failed to retrieve #{kind} template for #{params.inspect}: ") do
+      Proxy::Templates::TemplateProxyRequest.new.get_template(kind, request.env, params)
     end
   end
 end

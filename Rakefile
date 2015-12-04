@@ -1,6 +1,10 @@
 require 'rake'
 require 'rake/testtask'
 require 'rdoc/task'
+require 'fileutils'
+require 'tmpdir'
+require File.join(File.dirname(__FILE__),'extra/migrate_settings')
+
 load 'tasks/proxy_tasks.rake'
 load 'tasks/jenkins.rake'
 load 'tasks/pkg.rake'
@@ -19,13 +23,7 @@ Rake::TestTask.new(:test) do |t|
   t.libs << '.'
   t.libs << 'lib'
   t.libs << 'test'
-  files = FileList['test/**/*_test.rb']
-  if PLATFORM =~ /mingw/
-    files = FileList['test/**/server_ms_test*']
-  else
-    files = FileList['test/**/*_test.rb'].delete_if{|f| f =~ /_ms_/}
-  end
-  t.test_files  = files
+  t.test_files = FileList['test/**/*_test.rb']
   t.verbose = true
 end
 
@@ -36,4 +34,23 @@ Rake::RDocTask.new(:rdoc) do |rdoc|
   rdoc.options << '--line-numbers' << '--inline-source'
   rdoc.rdoc_files.include('README')
   rdoc.rdoc_files.include('lib/**/*.rb')
+end
+
+desc 'Migrate configuration settings.'
+task :migrate_settings do
+  app_dir = File.dirname(__FILE__)
+  config_src_path = File.join(app_dir, "config", "settings.yml")
+  modules_config_src_path = File.join(app_dir, "config", "settings.d")
+  migrations_dir_path = File.join(app_dir, "extra", "migrations")
+  migrations_state_file_path = File.join(app_dir, "config", "migration_state")
+  FileUtils.touch(migrations_state_file_path)
+
+  Dir.mktmpdir do |working_dir|
+    ::Proxy::Migrator.new(
+        working_dir, migrations_dir_path, config_src_path, modules_config_src_path,
+        ::Proxy::Migrations.new(migrations_state_file_path).load_past_migrations!).migrate
+
+    FileUtils.mv(File.join(app_dir, "config"), File.join(app_dir, "config_#{Time.now.strftime("%Y%m%d%H%M%S")}"))
+    FileUtils.mv(File.join(working_dir, "result"), File.join(app_dir, "config"))
+  end
 end

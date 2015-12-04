@@ -5,14 +5,19 @@ require 'base64'
 module Proxy::Util
   class CommandTask
     include Proxy::Log
+    attr_reader :command
 
     # create new task and spawn new thread logging all the cmd
     # output to the proxy log. only the process' output is connected
     # stderr is redirected to proxy error log, stdout to proxy debug log
-    def initialize(acommand, &blk)
+    def initialize(acommand)
+      @command = acommand
+    end
+
+    def start(&ensured_block)
       # run the task in its own thread
-      logger.debug "Starting task: #{acommand}"
-      @task = Thread.new(acommand) do |cmd|
+      logger.debug "Starting task: #{@command}"
+      @task = Thread.new(@command) do |cmd|
         begin
           status = nil
           Open3::popen3(cmd) do |stdin,stdout,stderr,thr|
@@ -22,7 +27,7 @@ module Proxy::Util
               logger.debug "[#{pid}] #{line}"
             end
             stderr.each do |line|
-              logger.debug "[#{pid}] #{line}"
+              logger.error "[#{pid}] #{line}"
             end
             # In Ruby 1.8, popen3 always reports an error code of 0 in $?.
             # In Ruby >= 1.9, call thr.value to wait for a Process::Status object.
@@ -33,6 +38,7 @@ module Proxy::Util
           yield if block_given?
         end
       end
+      self
     end
 
     # wait for the task to finish and get the subprocess return code

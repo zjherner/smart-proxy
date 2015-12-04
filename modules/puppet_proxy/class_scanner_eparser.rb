@@ -1,5 +1,5 @@
-require 'puppet_proxy/puppet_class'
 require 'puppet'
+require 'puppet_proxy/puppet_class'
 require 'puppet_proxy/class_scanner_base'
 
 if Puppet::PUPPETVERSION.to_f >= 3.2
@@ -7,45 +7,41 @@ if Puppet::PUPPETVERSION.to_f >= 3.2
 
   module Proxy::Puppet
     class ClassScannerEParser < ClassScannerBase
-      class << self
+      def scan_manifest manifest, filename = ''
+        # FIX ME:
+        # We must use this on puppet 2.6, as it appears to change its global state when used.
+        # We should probably initialize puppet just once (during startup) on other platforms
+        # as global state changes can lead to concurrency issues
+        # If it's important to detect changes in environments without proxy restarts,
+        # we should consider switching to environments api when they it's available.
+      ::Proxy::Puppet::Initializer.new.reset_puppet
+        klasses = []
 
-        # scans a given directory and its sub directory for puppet classes
-        # returns an array of PuppetClass objects.
-        def scan_directory directory, environment
-          super directory, environment
-        end
+        already_seen = Set.new
+        already_seen << '' # Prevent the toplevel "main" class from matching
+        ast = Puppet::Pops::Parser::Parser.new.parse_string manifest
+        class_finder = ClassFinder.new
 
-        def scan_manifest manifest, filename = ''
-          klasses = []
+        class_finder.do_find ast.current
+        klasses = class_finder.klasses
 
-          already_seen = Set.new
-          already_seen << '' # Prevent the toplevel "main" class from matching
-          ast = Puppet::Pops::Parser::Parser.new.parse_string manifest
-          class_finder = ClassFinder.new
-
-          class_finder.do_find ast.current
-          klasses = class_finder.klasses
-
-          klasses
-        rescue => e
-          puts "Error while parsing #{filename}: #{e}"
-          klasses
-        end
+        klasses
+      rescue => e
+        puts "Error while parsing #{filename}: #{e}"
+        klasses
       end
     end
 
     class ClassFinder
-
-      @@finder_visitor ||= Puppet::Pops::Visitor.new(nil,'find',0,0)
-
       attr_reader :klasses
 
       def initialize
         @klasses = []
+        @finder_visitor = Puppet::Pops::Visitor.new(self, 'find', 0, 0)
       end
 
       def do_find ast
-        @@finder_visitor.visit_this(self, ast)
+        @finder_visitor.visit(ast)
       end
 
       def find_HostClassDefinition o

@@ -17,15 +17,19 @@ module Proxy::DHCP
     include Proxy::Log
     include Proxy::Validations
 
-    def initialize server, network, netmask
-      @server    = validate_server server
-      @network   = validate_ip network
-      @netmask   = validate_ip netmask
-      @options   = {}
-      @records   = []
-      @timestamp = Time.now
-      @loaded    = false
-      raise Proxy::DHCP::Error, "Unable to Add Subnet" unless @server.add_subnet(self)
+    def initialize network, netmask, options = {}
+      @network = validate_ip network
+      @netmask = validate_ip netmask
+      @options = {}
+
+      @options[:routers] = options[:routers].each{|ip| validate_ip ip } if options[:routers]
+      @options[:domain_name] = options[:domain_name] if options[:domain_name]
+      @options[:domain_name_servers] = options[:domain_name_servers].each{|ip| validate_ip ip } if options[:domain_name_servers]
+      @options[:ntp_servers] = options[:ntp_servers].each{|ip| validate_ip ip } if options[:ntp_servers]
+      @options[:interface_mtu] = options[:interface_mtu].to_i if options[:interface_mtu]
+      @options[:range] = options[:range] if options[:range] && options[:range][0] && options[:range][1] && valid_range(:from => options[:range][0], :to => options[:range][1])
+
+      @timestamp     = Time.now
     end
 
     def include? ip
@@ -43,77 +47,6 @@ module Proxy::DHCP
     def range
       r=valid_range
       "#{r.first}-#{r.last}"
-    end
-
-    def clear
-      @records = []
-      @loaded  = false
-    end
-
-    def loaded?
-      @loaded
-    end
-
-    def size
-      @records.size
-    end
-
-    def load
-      self.clear
-      return false if loaded?
-      @loaded = true
-      server.loadSubnetData self
-      logger.debug "Lazy loaded #{self} records"
-    end
-
-    def reload
-      clear
-      self.load
-    end
-
-    def records
-      self.load if not loaded?
-      @records
-    end
-
-    def [] record
-      records_for record, :all
-    end
-
-    def has_mac? mac, type
-      case type
-      when :reservation
-        reservations
-      when :lease
-        leases
-      else
-        records
-      end.reverse_each {|r| return r if r.mac == mac.downcase}
-
-      return false
-    end
-
-    def has_ip? ip, type
-      case type
-      when :reservation
-        reservations
-      when :lease
-        leases
-      else
-        records
-      end.reverse_each {|r| return r if r.ip == ip}
-
-      return false
-    end
-
-    # adds a record to a subnet
-    def add_record record
-      # Record all leases, since the definition of a duplicate depends on whether we
-      # are searching by ip or mac. Arrays have fixed sort order so we can rely on this
-      # being the order they were read from the file
-      @records.push record
-      logger.debug "Added #{record} to #{self}"
-      return true
     end
 
     def get_index_and_lock filename
@@ -142,14 +75,7 @@ module Proxy::DHCP
 
     # returns the next unused IP Address in a subnet
     # Pings the IP address as well (just in case its not in Proxy::DHCP)
-    def unused_ip args = {}
-      # first check if we already have a record for this host
-      # if we do, we can simply reuse the same ip address.
-      if args[:mac] && (r = has_mac?(args[:mac], :all)) && valid_range(args).include?(r.ip)
-        logger.debug "Found an existing dhcp record #{r}, reusing..."
-        return r.ip
-      end
-
+    def unused_ip records, args = {}
       free_ips = valid_range(args) - records.collect{|record| record.ip}
       if free_ips.empty?
         logger.warn "No free IPs at #{self}"
@@ -181,12 +107,6 @@ module Proxy::DHCP
       end
     end
 
-    def delete record
-      if @records.delete(record).nil?
-        raise Proxy::DHCP::InvalidRecord, "Removing a Proxy::DHCP Record which doesn't exist"
-      end
-    end
-
     def valid_range args = {}
       logger.debug "trying to find an ip address, we got #{args.inspect}"
       if args[:from] && (from=validate_ip(args[:from])) && args[:to] && (to=validate_ip(args[:to]))
@@ -203,28 +123,6 @@ module Proxy::DHCP
 
     def inspect
       self
-    end
-
-    def reservations
-      records.collect{|r| r if r.kind == "reservation"}.compact
-    end
-
-    def leases
-      records.collect{|r| r if r.kind == "lease"}.compact
-    end
-
-    def records_for record, type
-      self.load if not loaded?
-      return has_mac?(record, type) if (validate_mac(record) rescue nil)
-      return has_ip?(record, type)  if (validate_ip(record) rescue nil)
-    end
-
-    def reservation_for record
-      records_for record, :reservation
-    end
-
-    def lease_for record
-      records_for record, :lease
     end
 
     def <=> other

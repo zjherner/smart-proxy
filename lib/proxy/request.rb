@@ -13,10 +13,10 @@ module Proxy::HttpRequest
       input.map{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v)}"}.join("&")
     end
 
-    def create_get(path, query={})
+    def create_get(path, query={}, headers={})
       uri = uri(path)
       req = Net::HTTP::Get.new("#{uri.path || '/'}?#{query_string(query)}")
-      req = add_headers(req)
+      req = add_headers(req, headers)
       req
     end
 
@@ -24,15 +24,18 @@ module Proxy::HttpRequest
       URI.join(@base_uri.to_s, path)
     end
 
-    def add_headers(req)
+    def add_headers(req, headers={})
       req.add_field('Accept', 'application/json,version=2')
       req.content_type = 'application/json'
+      headers.each do |k, v|
+        req.add_field(k, v)
+      end
       req
     end
 
-    def create_post(path, body)
+    def create_post(path, body, headers={})
       req = Net::HTTP::Post.new(uri(path).path)
-      req = add_headers(req)
+      req = add_headers(req, headers)
       req.body = body
       req
     end
@@ -77,18 +80,6 @@ module Proxy::HttpRequest
         end
       end
       return http
-    end
-  end
-
-  class Facts < ForemanRequest
-    def post_facts(facts)
-      send_request(request_factory.create_post('/api/hosts/facts',facts))
-    end
-  end
-
-  class Reports < ForemanRequest
-    def post_report(report)
-      send_request(request_factory.create_post('/api/reports',report))
     end
   end
 end

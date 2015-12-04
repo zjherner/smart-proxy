@@ -1,5 +1,6 @@
 require 'time'
 require 'dhcp/subnet'
+require 'dhcp/record/deleted_reservation'
 require 'dhcp/record/reservation'
 require 'dhcp/record/lease'
 require 'dhcp/server'
@@ -8,8 +9,15 @@ module Proxy::DHCP
   class ISC < Server
     include Proxy::Util
 
+    def self.instance_with_default_parameters
+        Proxy::DHCP::ISC.new(:name => Proxy::DhcpPlugin.settings.dhcp_server,
+                             :config => Proxy::DhcpPlugin.settings.dhcp_config,
+                             :leases => Proxy::DhcpPlugin.settings.dhcp_leases,
+                             :service => Proxy::DHCP::SubnetService.instance_with_default_parameters)
+    end
+
     def initialize options
-      super(options[:name])
+      super(options[:name], options[:service])
       @config = read_config(options[:config]).join("")
       @leases = read_config(options[:leases], true).join("")
     end
@@ -25,7 +33,6 @@ module Proxy::DHCP
       omcmd "open"
       omcmd "remove"
       omcmd("disconnect", msg)
-      subnet.delete record
     end
 
     def addRecord options = {}
@@ -46,22 +53,22 @@ module Proxy::DHCP
 
       statements += solaris_options_statements(options)
       statements += ztp_options_statements(options)
+      statements += poap_options_statements(options)
 
-      omcmd "set statements = \"#{statements.join(" ")}\""      unless statements.empty?
+      omcmd "set statements = \"#{statements.join(' ')}\""      unless statements.empty?
       omcmd "create"
       omcmd("disconnect", "Added DHCP reservation for #{record}")
       record
     end
 
-    def loadSubnetData subnet
-      super
-
+    def parse_config_and_leases_for_records
       # Config will have host blocks,
       # Leases will have host and lease blocks.
       # Scan both together, in order, because host delete and lease end
       # events are appended linearly to the leases file.
       conf = @config + @leases
 
+      ret_val = []
       # scan for host statements
       conf.scan(/host\s+(\S+\s*\{[^}]+\})/) do |host|
         if match = host[0].match(/^(\S+)\s*\{([^\}]+)/)
@@ -71,27 +78,14 @@ module Proxy::DHCP
           body.split(";").each do |data|
             opts.merge!(parse_record_options(data))
           end
-          if opts[:deleted]
-            record = find_record_by_hostname(subnet, hostname, 'reservation')
-            subnet.delete record if record
-            next
-          end
         end
-        begin
-          if subnet.include?(opts[:ip])
-            # delete possible duplicities 
-            if dupe = subnet.has_mac?(opts[:mac], :reservation)
-              subnet.delete(dupe)
-            end
-            if dupe = subnet.has_ip?(opts[:ip], :reservation)
-              subnet.delete(dupe)
-            end
-            # and add the record
-            Proxy::DHCP::Reservation.new(opts.merge(:subnet => subnet))
-          end
-        rescue Exception => e
-          logger.warn "skipped #{hostname} - #{e}"
+        if opts[:deleted]
+          ret_val << Proxy::DHCP::DeletedReservation.new(opts)
+          next
         end
+        subnet = @service.find_subnet(opts[:ip])
+        next unless subnet
+        ret_val << Proxy::DHCP::Reservation.new(opts.merge(:subnet => subnet))
       end
 
       conf.scan(/lease\s+(\S+\s*\{[^}]+\})/) do |lease|
@@ -103,38 +97,88 @@ module Proxy::DHCP
             opts.merge! parse_record_options(data)
           end
           next if opts[:mac].nil?
-          # delete expired (explicitly) expired leases
-          if opts[:state] == "free" || (opts[:next_state] == "free" && opts[:ends] && opts[:ends] < Time.now)
-            record = find_record_by_ip(subnet, ip, 'lease')
-            subnet.delete record if record
-            next
-          end
-          if subnet.include? ip
-            # delete possible duplicities 
-            if dupe = subnet.has_mac?(opts[:mac], :lease)
-              subnet.delete(dupe)
-            end
-            if dupe = subnet.has_ip?(ip, :lease)
-              subnet.delete(dupe)
-            end
-            # and add the record
-            Proxy::DHCP::Lease.new(opts.merge(:subnet => subnet, :ip => ip))
-          end
+
+          subnet = @service.find_subnet(ip)
+          next unless subnet
+          ret_val << Proxy::DHCP::Lease.new(opts.merge(:subnet => subnet, :ip => ip))
         end
       end
-      report "Enumerated hosts on #{subnet.network}"
+
+      ret_val
     end
 
-    private
+    def initialize_memory_store_with_dhcp_records(records)
+      records.each do |record|
+        case record
+        when Proxy::DHCP::DeletedReservation
+          record = @service.find_host_by_hostname(record.name)
+          @service.delete_host(record) if record
+          next
+        when Proxy::DHCP::Reservation
+          if dupe = @service.find_host_by_mac(record.subnet_address, record.mac)
+            @service.delete_host(dupe)
+          end
+          if dupe = @service.find_host_by_ip(record.subnet_address, record.ip)
+            @service.delete_host(dupe)
+          end
+
+          @service.add_host(record.subnet_address, record)
+        when Proxy::DHCP::Lease
+          if record.options[:state] == "free" || (record.options[:next_state] == "free" && record.options[:ends] && record.options[:ends] < Time.now)
+            record = @service.find_lease_by_ip(record.subnet_address, record.ip)
+            @service.delete_lease(record) if record
+            next
+          end
+
+          if dupe = @service.find_lease_by_mac(record.subnet_address, record.mac)
+            @service.delete_lease(dupe)
+          end
+          if dupe = @service.find_lease_by_ip(record.subnet_address, record.ip)
+            @service.delete_lease(dupe)
+          end
+
+          @service.add_lease(record.subnet_address, record)
+        end
+      end
+    end
+
+    def loadSubnetData subnet
+      initialize_memory_store_with_dhcp_records(parse_config_and_leases_for_records)
+    end
+
+    SUBNET_BLOCK_REGEX = /subnet\s+([\d\.]+)\s+netmask\s+([\d\.]+)\s*\{\s*([\w-]+\s*\{[^{}]*\}\s*|[\w-][^{}]*;\s*)*\}/
+    def parse_config_for_subnets
+      ret_val = []
+      # Extract subnets config block
+      @config.scan(SUBNET_BLOCK_REGEX) do |match|
+        network, netmask, subnet_config_lines = match
+        ret_val << Proxy::DHCP::Subnet.new(network, netmask, parse_subnet_options(subnet_config_lines))
+      end
+      ret_val
+    end
+
+    def parse_subnet_options(subnet_config_lines)
+      return {} unless subnet_config_lines
+
+      options = {}
+      subnet_config_lines.split(';').each do |option|
+        case option
+          when /^option\s+routers\s+[\d\.]+/
+            options[:routers] = get_ip_list_from_config_line(option)
+          when /^option\s+domain\-name\-servers\s+[\d\.]+/
+            options[:domain_name_servers] = get_ip_list_from_config_line(option)
+          when /^range\s+[\d\.]+\s+[\d\.]+/
+            # get IP addr range used for this subnet
+            options[:range] = get_range_from_config_line(option)
+        end
+      end
+
+      options.reject{|key, value| value.nil? || value.empty? }
+    end
 
     def loadSubnets
       super
-      @config.scan(/subnet\s+([\d\.]+)\s+netmask\s+([\d\.]+)/) do |match|
-        next unless managed_subnet? "#{match[0]}/#{match[1]}"
-
-        Proxy::DHCP::Subnet.new(self, match[0], match[1])
-      end
-      "Enumerated the scopes on #{@name}"
+      @service.add_subnets(*parse_config_for_subnets)
     end
 
     def parse_record_options text
@@ -188,6 +232,7 @@ module Proxy::DHCP
         @om = IO.popen("/bin/sh -c '#{om_binary} 2>&1'", "r+")
         @om.puts "key #{Proxy::DhcpPlugin.settings.dhcp_key_name} \"#{Proxy::DhcpPlugin.settings.dhcp_key_secret}\"" if Proxy::DhcpPlugin.settings.dhcp_key_name && Proxy::DhcpPlugin.settings.dhcp_key_secret
         @om.puts "server #{name}"
+        @om.puts "port #{Proxy::DhcpPlugin.settings.dhcp_omapi_port}"
         @om.puts "connect"
         @om.puts "new host"
       elsif cmd == "disconnect"
@@ -212,6 +257,7 @@ module Proxy::DHCP
         msg += ": Entry already exists" if response && response.grep(/object: already exists/).size > 0
         msg += ": No response from DHCP server" if response.nil? || response.grep(/not connected/).size > 0
         raise Proxy::DHCP::Collision, "Hardware address conflict." if response && response.grep(/object: key conflict/).size > 0
+        raise Proxy::DHCP::InvalidRecord if response && response.grep(/can\'t open object: not found/).size > 0
         raise Proxy::DHCP::Error.new(msg)
       else
         logger.info msg
@@ -224,18 +270,6 @@ module Proxy::DHCP
 
     def hex2ip hex
       hex.split(":").map{|h| h.to_i(16).to_s}.join(".")
-    end
-
-    def find_record_by_hostname subnet, hostname, kind
-      subnet.records.find do |v|
-        v.options[:hostname] == hostname && v.kind == kind
-      end
-    end
-
-    def find_record_by_ip subnet, ip, kind
-      subnet.records.find do |v|
-        v.options[:ip] == ip && v.kind == kind
-      end
     end
 
     # ISC stores timestamps in UTC, therefor forcing the time to load from GMT/UTC TZ
@@ -272,9 +306,7 @@ module Proxy::DHCP
       logger.debug "Reading config file #{file}"
       config = []
       File.readlines(file).each do |line|
-
-        line.strip! # remove left and right whitespace
-        next if line.start_with?("#") # remove comments
+        line = line.split('#').first.strip # remove comments, left and right whitespace
         next if line.empty? # remove blank lines
 
         if /^include\s+"(.*)"\s*;/ =~ line
@@ -381,5 +413,26 @@ module Proxy::DHCP
       end
       statements
     end
+
+    # Cisco NX-OS POAP requires special DHCP options
+    def poap_options_statements(options)
+      statements = []
+      if options[:filename] && options[:filename].match(/^poap.cfg.*/i)
+        logger.debug "setting POAP options"
+        statements << "option tftp-server-name = \\\"#{options[:nextServer]}\\\";"
+        statements << "option bootfile-name = \\\"#{options[:filename]}\\\";"
+      end
+      statements
+    end
+  end
+
+  # Get all IPv4 addresses provided by the ISC DHCP config line following the pattern "my-config-option-or-directive IPv4_ADDR[, IPv4_ADDR] [...];" and return an array.
+  def get_ip_list_from_config_line(option_line)
+    option_line.scan(/\s*((?:(?:\d{1,3}\.){3}\d{1,3})\s*(?:,\s*(?:(?:\d{1,3}\.){3}\d{1,3})\s*)*)/).first.first.gsub(/\s/,'').split(",").reject{|value| value.nil? || value.empty? }
+  end
+
+  # Get IPv4 range provided by the ISC DHCP config line following the pattern "range IPv4_ADDR IPv4_ADDR;" and return an array.
+  def get_range_from_config_line(range_line)
+    range_line.scan(/\s*((?:\d{1,3}\.){3}\d{1,3})\s*((?:\d{1,3}\.){3}\d{1,3})\s*/).first
   end
 end
